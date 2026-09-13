@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+<title>生活管理系統</title>
+<meta name="theme-color" content="#F7F4EF" />
+
+<!-- iOS "Add to Home Screen" full-screen app behavior -->
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-title" content="生活管理" />
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
+
+<!-- Android / general PWA install behavior -->
+<meta name="mobile-web-app-capable" content="yes" />
+<link rel="manifest" href="./manifest.json" />
+<link rel="icon" type="image/png" sizes="192x192" href="./icons/icon-192.png" />
+<link rel="icon" type="image/png" sizes="512x512" href="./icons/icon-512.png" />
+
+<style>
+  html, body { margin: 0; padding: 0; background: #F7F4EF; }
+  #root { min-height: 100vh; }
+  /* simple loading placeholder shown before React mounts */
+  #boot-loading {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC", "Microsoft JhengHei", sans-serif;
+    color: #6E4F58; font-size: 14px; background: #F7F4EF;
+  }
+</style>
+
+<!-- Resolve bare-specifier imports ("react", "lucide-react", ...) inside app.jsx to CDN ESM builds.
+     No bundler/build step needed - the browser's native ES module loader reads this directly. -->
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@18.3.1",
+    "react-dom": "https://esm.sh/react-dom@18.3.1",
+    "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+    "lucide-react": "https://esm.sh/lucide-react@0.383.0?external=react",
+    "recharts": "https://esm.sh/recharts@2.12.7?external=react,react-dom"
+  }
+}
+</script>
+</head>
+<body>
+<div id="root"><div id="boot-loading">載入中…</div></div>
+
+<!-- Babel standalone transpiles app.jsx's JSX syntax in the browser, then runs the result as a
+     real ES module (data-type="module") so the import statements above resolve via the import map. -->
+<script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+<script type="text/babel" data-type="module" data-presets="react" src="./app.jsx"></script>
+
+<script>
+  // basic offline support / installability boost - optional, fails silently if unsupported
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("./sw.js").catch(() => {});
+    });
+  }
+</script>
+</body>
+</html>
