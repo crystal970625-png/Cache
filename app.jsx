@@ -4,7 +4,7 @@ import {
   Home, CircleDollarSign, CalendarDays, Droplet, User, Plus, X, Pencil,
   Trash2, Settings, ChevronLeft, ChevronRight, ChevronDown, Upload, Check, GraduationCap,
   MapPin, Newspaper, Utensils, Grid3x3, FileText, Image as ImageIcon, NotebookPen, HelpCircle,
-  AlertTriangle, ExternalLink
+  AlertTriangle, ExternalLink, Clock, ListChecks
 } from "lucide-react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -141,7 +141,7 @@ function buildTodayTimeline(cal, dateObj) {
 // open (no background/push capability here), so it's re-evaluated on a timer against the current
 // clock rather than computed once. Deliberately does NOT include calendar events/courses per the
 // user's request - only assignments and exams count as "notifications".
-function getUpcomingDeadlines(assignments, exams, now, days = 7) {
+function getUpcomingDeadlines(assignments, exams, todos, now, days = 7) {
   const nowMs = now.getTime();
   const endMs = nowMs + days * 24 * 60 * 60 * 1000;
   const items = [];
@@ -154,9 +154,16 @@ function getUpcomingDeadlines(assignments, exams, now, days = 7) {
   });
   (exams || []).forEach((e) => {
     if (!e.date) return;
-    const dueMs = new Date(`${e.date}T${e.time || "23:59"}:00`).getTime();
+    const dueMs = new Date(`${e.date}T${e.start || "23:59"}:00`).getTime();
     if (!isNaN(dueMs) && dueMs >= nowMs && dueMs <= endMs) {
-      items.push({ kind: "exam", id: e.id, title: e.name, course: e.course, date: e.date, time: e.time, sortMs: dueMs });
+      items.push({ kind: "exam", id: e.id, title: e.name, course: e.course, date: e.date, time: e.start, sortMs: dueMs });
+    }
+  });
+  (todos || []).forEach((t) => {
+    if (!t.dueDate || t.done) return;
+    const dueMs = new Date(`${t.dueDate}T${t.dueTime || "23:59"}:00`).getTime();
+    if (!isNaN(dueMs) && dueMs >= nowMs && dueMs <= endMs) {
+      items.push({ kind: "todo", id: t.id, title: t.title, course: "", date: t.dueDate, time: t.dueTime, sortMs: dueMs });
     }
   });
   items.sort((a, b) => a.sortMs - b.sortMs);
@@ -221,13 +228,14 @@ function blockFont(height) {
 const DEFAULT_STATE = {
   profile: {
     nickname: "同學", email: "", enrollYear: "", password: "",
-    darkMode: false, notifications: false, fontSize: "medium", fontFamily: "rounded",
+    darkMode: false, notifications: true, fontSize: "medium", fontFamily: "rounded",
   },
   campusFiles: { calendarLink: CAMPUS_CALENDAR_LINK, mapFiles: [] },
   restaurants: [],
   habits: {},
   assignments: [], // 作業: { id, name, course, dueDate, dueTime, note, fileLink }
-  exams: [], // 考試: { id, name, course, date, time, note }
+  exams: [], // 考試: { id, name, course, date, start, end, note }
+  todos: [], // 待辦事項: { id, title, subitems: [{id,text,done}], note, done, scheduled, date, start, end, color }
   finance: { holdingAmount: 0, months: {} },
   cal: (() => {
     const ay0 = getAcademicYear(new Date());
@@ -502,6 +510,20 @@ function Field({ label, children }) {
   );
 }
 
+// A "time" input that can genuinely be left empty. Native <input type="time"> is fine once it
+// already has a value, but on most mobile browsers, tapping an EMPTY time input opens a wheel
+// picker that always has some value already dialed in - so any tap-and-confirm ends up filling
+// it in, making "clear it" not really stick. Instead: when there's no value, show a plain button;
+// only swap in the real time input once the person has actually chosen to set one.
+function OptionalTimeField({ value, onChange }) {
+  return (
+    <div className="two-col" style={{ gridTemplateColumns: "1fr auto" }}>
+      <input type="time" value={value || ""} onChange={(e) => onChange(e.target.value)} />
+      {value && <button type="button" className="icon-btn" onMouseDown={(e) => e.stopPropagation()} onClick={(e) => { e.preventDefault(); e.stopPropagation(); onChange(""); }} title="清除時間"><X size={14} /></button>}
+    </div>
+  );
+}
+
 function Toggle({ checked, onChange }) {
   return (
     <button className={"toggle" + (checked ? " on" : "")} onClick={() => onChange(!checked)}>
@@ -544,6 +566,42 @@ function HomePage({ state, setState, today, reminders }) {
   const [remindersDismissed, setRemindersDismissed] = useState(false);
   const [editAssignment, setEditAssignment] = useState(null);
   const [editExam, setEditExam] = useState(null);
+  const [editTodo, setEditTodo] = useState(null);
+
+  const todos = state.todos || [];
+  const sortedTodos = todos.slice().sort((a, b) => {
+    if (!!a.done !== !!b.done) return a.done ? 1 : -1; // unfinished first
+    const ak = a.dueDate ? `${a.dueDate}${a.dueTime || "23:59"}` : a.scheduled && a.date ? `${a.date}${a.start || ""}` : "9999";
+    const bk = b.dueDate ? `${b.dueDate}${b.dueTime || "23:59"}` : b.scheduled && b.date ? `${b.date}${b.start || ""}` : "9999";
+    return ak.localeCompare(bk);
+  });
+
+  function todoEventId(id) { return id + "__todo"; }
+  function saveTodo(t) {
+    setState((s) => {
+      const list = s.todos || [];
+      const exists = list.some((x) => x.id === t.id);
+      const nextTodos = exists ? list.map((x) => x.id === t.id ? t : x) : [...list, t];
+      const evId = todoEventId(t.id);
+      let events = s.cal.events.filter((x) => x.id !== evId);
+      if (t.scheduled && t.date) {
+        events = [...events, { id: evId, title: t.title, date: t.date, start: t.start || "09:00", end: t.end || "10:00", note: t.note || "", color: t.color || "#7d97ab" }];
+      }
+      return { ...s, todos: nextTodos, cal: { ...s.cal, events } };
+    });
+    setModal("todos");
+  }
+  function deleteTodo(id) {
+    setState((s) => ({
+      ...s,
+      todos: (s.todos || []).filter((x) => x.id !== id),
+      cal: { ...s.cal, events: s.cal.events.filter((x) => x.id !== todoEventId(id)) },
+    }));
+    setModal("todos");
+  }
+  function toggleTodoDone(id) {
+    setState((s) => ({ ...s, todos: (s.todos || []).map((x) => x.id === id ? { ...x, done: !x.done } : x) }));
+  }
 
   const timeline = buildTodayTimeline(state.cal, today);
   const assignments = state.assignments || [];
@@ -555,28 +613,50 @@ function HomePage({ state, setState, today, reminders }) {
   const sortedExams = exams.slice().sort((a, b) => `${a.date}${a.time || ""}`.localeCompare(`${b.date}${b.time || ""}`));
   const todayKeyForDeadline = toKey(today);
 
+  function assignmentEventId(id) { return id + "__assignment"; }
   function saveAssignment(a) {
     setState((s) => {
       const list = s.assignments || [];
       const exists = list.some((x) => x.id === a.id);
-      return { ...s, assignments: exists ? list.map((x) => x.id === a.id ? a : x) : [...list, a] };
+      const nextList = exists ? list.map((x) => x.id === a.id ? a : x) : [...list, a];
+      const evId = assignmentEventId(a.id);
+      let events = s.cal.events.filter((x) => x.id !== evId);
+      if (a.addToCalendar && a.calDate) {
+        events = [...events, { id: evId, title: `📝 ${a.name}`, date: a.calDate, start: a.calStart || "09:00", end: a.calEnd || "10:00", note: a.note || "", color: a.color || "#7d97ab" }];
+      }
+      return { ...s, assignments: nextList, cal: { ...s.cal, events } };
     });
     setModal("assignments");
   }
   function deleteAssignment(id) {
-    setState((s) => ({ ...s, assignments: (s.assignments || []).filter((x) => x.id !== id) }));
+    setState((s) => ({
+      ...s,
+      assignments: (s.assignments || []).filter((x) => x.id !== id),
+      cal: { ...s.cal, events: s.cal.events.filter((x) => x.id !== assignmentEventId(id)) },
+    }));
     setModal("assignments");
   }
+  function examEventId(id) { return id + "__exam"; }
   function saveExam(e) {
     setState((s) => {
       const list = s.exams || [];
       const exists = list.some((x) => x.id === e.id);
-      return { ...s, exams: exists ? list.map((x) => x.id === e.id ? e : x) : [...list, e] };
+      const nextList = exists ? list.map((x) => x.id === e.id ? e : x) : [...list, e];
+      const evId = examEventId(e.id);
+      let events = s.cal.events.filter((x) => x.id !== evId);
+      if (e.addToCalendar && e.date) {
+        events = [...events, { id: evId, title: `📖 ${e.name}`, date: e.date, start: e.start || "09:00", end: e.end || "10:00", note: e.note || "", color: e.color || "#c9896a" }];
+      }
+      return { ...s, exams: nextList, cal: { ...s.cal, events } };
     });
     setModal("exams");
   }
   function deleteExam(id) {
-    setState((s) => ({ ...s, exams: (s.exams || []).filter((x) => x.id !== id) }));
+    setState((s) => ({
+      ...s,
+      exams: (s.exams || []).filter((x) => x.id !== id),
+      cal: { ...s.cal, events: s.cal.events.filter((x) => x.id !== examEventId(id)) },
+    }));
     setModal("exams");
   }
 
@@ -646,9 +726,9 @@ function HomePage({ state, setState, today, reminders }) {
             </div>
             {reminders.map((r) => (
               <div className="reminder-item" key={`${r.kind}-${r.id}`}>
-                <span className="reminder-dot" style={{ background: r.kind === "exam" ? "#c9896a" : "#7d97ab" }} />
+                <span className="reminder-dot" style={{ background: r.kind === "exam" ? "#c9896a" : r.kind === "todo" ? "#8a9a6f" : "#7d97ab" }} />
                 <span className="reminder-time">{r.date.slice(5)}{r.time ? ` ${r.time}` : ""}</span>
-                <span className="reminder-title">{r.kind === "exam" ? "📖" : "📝"} {r.title}{r.course ? `（${r.course}）` : ""}</span>
+                <span className="reminder-title">{r.kind === "exam" ? "📖" : r.kind === "todo" ? "✅" : "📝"} {r.title}{r.course ? `（${r.course}）` : ""}</span>
               </div>
             ))}
           </div>
@@ -682,6 +762,7 @@ function HomePage({ state, setState, today, reminders }) {
           <IconTile icon={<Grid3x3 size={22} />} label="打卡牆" onClick={() => setModal("habits")} />
           <IconTile icon={<NotebookPen size={22} />} label="作業" onClick={() => setModal("assignments")} />
           <IconTile icon={<HelpCircle size={22} />} label="考試" onClick={() => setModal("exams")} />
+          <IconTile icon={<ListChecks size={22} />} label="待辦事項" onClick={() => setModal("todos")} />
         </div>
       </div>
 
@@ -765,7 +846,7 @@ function HomePage({ state, setState, today, reminders }) {
             {sortedExams.map((e) => (
               <div className="course-row" key={e.id}>
                 <span className="ellipsis" style={{ color: e.date < todayKeyForDeadline ? "#b95c5c" : undefined }}>
-                  <strong>{e.name}</strong>{e.course ? ` · ${e.course}` : ""} · {e.date}{e.time ? ` ${e.time}` : ""}
+                  <strong>{e.name}</strong>{e.course ? ` · ${e.course}` : ""} · {e.date}{e.start ? ` ${e.start}${e.end ? `–${e.end}` : ""}` : ""}
                 </span>
                 <span className="row-actions">
                   <button className="icon-btn" onClick={() => { setEditExam(e); setModal("examForm"); }}><Pencil size={14} /></button>
@@ -781,6 +862,38 @@ function HomePage({ state, setState, today, reminders }) {
         <Modal title={editExam ? "編輯考試" : "新增考試"} onClose={() => setModal("exams")}>
           <ExamForm item={editExam} courseOptions={courseOptions} onSave={saveExam}
             onDelete={editExam ? () => deleteExam(editExam.id) : null} />
+        </Modal>
+      )}
+      {modal === "todos" && (
+        <Modal title="待辦事項" onClose={() => setModal(null)} wide>
+          <button className="btn-outline" onClick={() => { setEditTodo(null); setModal("todoForm"); }}><Plus size={16} /> 新增待辦事項</button>
+          <div className="course-list">
+            {sortedTodos.map((t) => {
+              const doneCount = (t.subitems || []).filter((si) => si.done).length;
+              return (
+                <div className="course-row" key={t.id}>
+                  <input type="checkbox" checked={!!t.done} onChange={() => toggleTodoDone(t.id)} />
+                  <span className="ellipsis" style={{ textDecoration: t.done ? "line-through" : "none", opacity: t.done ? 0.6 : 1, cursor: "pointer" }}
+                    onClick={() => { setEditTodo(t); setModal("todoForm"); }}>
+                    <strong style={t.dueDate && !t.done && t.dueDate < todayKeyForDeadline ? { color: "#b95c5c" } : undefined}>{t.title}</strong>
+                    {t.subitems && t.subitems.length > 0 ? ` · ${doneCount}/${t.subitems.length} 項細項` : ""}
+                    {t.dueDate ? ` · 截止 ${t.dueDate}${t.dueTime ? ` ${t.dueTime}` : ""}` : ""}
+                    {t.scheduled && t.date ? ` · 行事曆 ${t.date}${t.start ? ` ${t.start}` : ""}` : ""}
+                  </span>
+                  <span className="row-actions">
+                    <button className="icon-btn" onClick={() => { setEditTodo(t); setModal("todoForm"); }}><Pencil size={14} /></button>
+                    <button className="icon-btn" onClick={() => deleteTodo(t.id)}><Trash2 size={14} /></button>
+                  </span>
+                </div>
+              );
+            })}
+            {sortedTodos.length === 0 && <div className="empty-hint">還沒有新增任何待辦事項</div>}
+          </div>
+        </Modal>
+      )}
+      {modal === "todoForm" && (
+        <Modal title={editTodo ? "編輯待辦事項" : "新增待辦事項"} onClose={() => setModal("todos")}>
+          <TodoForm item={editTodo} onSave={saveTodo} onDelete={editTodo ? () => deleteTodo(editTodo.id) : null} />
         </Modal>
       )}
     </div>
@@ -1088,7 +1201,7 @@ function FinancePage({ state, setState, today }) {
       )}
       {modal === "entry" && (
         <Modal title={editEntry ? "編輯消費紀錄" : "新增消費紀錄"} onClose={() => setModal(null)}>
-          <EntryForm entry={editEntry} categories={md.categories} monthKey={monthKey}
+          <EntryForm entry={editEntry} categories={md.categories} monthKey={monthKey} today={today}
             onSave={(e) => { saveEntry(e); setModal(null); }} />
         </Modal>
       )}
@@ -1129,8 +1242,9 @@ function CategoryEditor({ categories, onChange }) {
   );
 }
 
-function EntryForm({ entry, categories, monthKey, onSave }) {
-  const [date, setDate] = useState(entry?.date || `${monthKey}-01`);
+function EntryForm({ entry, categories, monthKey, today, onSave }) {
+  const defaultDate = monthKey === toMonthKey(today) ? toKey(today) : `${monthKey}-01`;
+  const [date, setDate] = useState(entry?.date || defaultDate);
   const [category, setCategory] = useState(entry?.category || categories[0] || "");
   const [amount, setAmount] = useState(entry?.amount ?? "");
   const [note, setNote] = useState(entry?.note || "");
@@ -1208,6 +1322,20 @@ function CalendarPage({ state, setState, today, imgSaving, imgSaved, imgProgress
   function deleteEvent(id) {
     setState((s) => ({ ...s, cal: { ...s.cal, events: s.cal.events.filter((x) => x.id !== id) } }));
   }
+  function toggleTutorialCancelled(courseId, dateKey) {
+    setState((s) => ({
+      ...s, cal: {
+        ...s.cal, semesters: s.cal.semesters.map((sem) => ({
+          ...sem, courses: sem.courses.map((c) => {
+            if (c.id !== courseId || !c.tutorial) return c;
+            const cancelled = c.tutorial.cancelled || [];
+            const nextCancelled = cancelled.includes(dateKey) ? cancelled.filter((k) => k !== dateKey) : [...cancelled, dateKey];
+            return { ...c, tutorial: { ...c.tutorial, cancelled: nextCancelled } };
+          }),
+        })),
+      },
+    }));
+  }
   function updateAttendance(courseId, patch) {
     setState((s) => ({
       ...s, cal: {
@@ -1218,16 +1346,35 @@ function CalendarPage({ state, setState, today, imgSaving, imgSaved, imgProgress
       },
     }));
   }
-  function getCourseSessionDates(course) {
+  function getSessionDatesForDay(course, day) {
     const owner = semesters.find((sem) => sem.courses.some((c) => c.id === course.id)) || displaySemester;
     if (!owner || !owner.schoolYearStart || !owner.totalWeeks) return [];
     const start = new Date(owner.schoolYearStart + "T00:00:00");
     const startWeekday = (start.getDay() + 6) % 7 + 1; // 1=Mon..7=Sun
-    let diff = course.day - startWeekday;
+    let diff = day - startWeekday;
     if (diff < 0) diff += 7;
     const first = addDays(start, diff);
     const weeks = Number(owner.totalWeeks) || 0;
     return Array.from({ length: weeks }, (_, w) => addDays(first, w * 7));
+  }
+  function getCourseSessionDates(course) {
+    return getSessionDatesForDay(course, course.day);
+  }
+  function getTutorialSessionDates(course) {
+    if (!course.tutorial) return [];
+    return getSessionDatesForDay(course, course.tutorial.day);
+  }
+  // presents a course's tutorial session as its own course-shaped object so it can reuse the
+  // exact same calendar block / attendance panel rendering as a regular course
+  function tutorialAsCourse(c) {
+    return {
+      id: c.id + "__tutorial",
+      name: c.name + "（輔導）",
+      professor: c.professor, credits: null, code: c.code, room: c.room,
+      day: c.tutorial.day, start: c.tutorial.start, end: c.tutorial.end,
+      color: c.tutorial.color || c.color,
+      __parentCourseId: c.id,
+    };
   }
   function shiftSemester(dir) {
     const chrono = chronoSemesters(semesters);
@@ -1380,6 +1527,9 @@ function CalendarPage({ state, setState, today, imgSaving, imgSaved, imgProgress
               // courses only render when this specific date falls within a semester's term range
               const daySemester = findSemesterForDate(semesters, d);
               const courses = daySemester ? daySemester.courses.filter((c) => c.day === dayNum) : [];
+              const tutorials = daySemester
+                ? daySemester.courses.filter((c) => c.tutorial && c.tutorial.day === dayNum && !(c.tutorial.cancelled || []).includes(dayKey))
+                : [];
               const events = state.cal.events.filter((e) => e.date === dayKey);
               return (
                 <div className="cal-col" key={colIdx} style={{ height: (HOUR_END - HOUR_START) * HOUR_PX }}>
@@ -1393,7 +1543,22 @@ function CalendarPage({ state, setState, today, imgSaving, imgSaved, imgProgress
                         <span className="cal-block-bar" style={{ background: col }} />
                         <span className="cal-block-content">
                           <span className="cal-block-title" style={{ fontSize: blockFont(height).title, lineHeight: blockFont(height).lh }}>{c.name}</span>
-                          {blockFont(height).sub > 0 && <span className="cal-block-sub" style={{ fontSize: blockFont(height).sub }}>{c.start}–{c.end}</span>}
+                          {blockFont(height).sub > 0 && <span className="cal-block-sub" style={{ fontSize: blockFont(height).sub }}>{c.start}–{c.end}{c.room ? ` · ${c.room}` : ""}</span>}
+                        </span>
+                      </div>
+                    );
+                  })}
+                  {tutorials.map((c) => {
+                    const t = c.tutorial;
+                    const top = (timeToMinutes(t.start) - HOUR_START * 60) / 60 * HOUR_PX;
+                    const height = Math.max(20, (timeToMinutes(t.end) - timeToMinutes(t.start)) / 60 * HOUR_PX);
+                    const col = t.color || c.color || "#a97c7c";
+                    return (
+                      <div key={c.id + "__tutorial"} className="cal-block" style={{ top, height, background: hexToRgba(lightenHex(col, 0.45), 0.5) }} onClick={() => setAttendCourse(tutorialAsCourse(c))}>
+                        <span className="cal-block-bar" style={{ background: col }} />
+                        <span className="cal-block-content">
+                          <span className="cal-block-title" style={{ fontSize: blockFont(height).title, lineHeight: blockFont(height).lh }}>{c.name}（輔導）</span>
+                          {blockFont(height).sub > 0 && <span className="cal-block-sub" style={{ fontSize: blockFont(height).sub }}>{t.start}–{t.end}{(t.room || c.room) ? ` · ${t.room || c.room}` : ""}</span>}
                         </span>
                       </div>
                     );
@@ -1476,7 +1641,7 @@ function CalendarPage({ state, setState, today, imgSaving, imgSaved, imgProgress
             {activeSemester.courses.map((c) => (
               <div className="course-row" key={c.id}>
                 <span className="color-dot" style={{ background: c.color }} />
-                <span className="ellipsis">{c.name}（{WEEKDAY_FULL[c.day - 1]} {c.start}-{c.end}）</span>
+                <span className="ellipsis">{c.name}（{WEEKDAY_FULL[c.day - 1]} {c.start}-{c.end}）{c.tutorial && <span className="chip-gray" style={{ marginLeft: 4, fontSize: 10, padding: "1px 6px" }}>輔導</span>}</span>
                 <span className="row-actions">
                   <button className="icon-btn" onClick={() => { setEditCourse(c); setModal("courseForm"); }}><Pencil size={14} /></button>
                   <button className="icon-btn" onClick={() => deleteCourse(c.id)}><Trash2 size={14} /></button>
@@ -1505,13 +1670,22 @@ function CalendarPage({ state, setState, today, imgSaving, imgSaved, imgProgress
             onDelete={editEvent ? () => { deleteEvent(editEvent.id); setModal(null); } : null} />
         </Modal>
       )}
-      {attendCourse && (
-        <Modal title={attendCourse.name} onClose={() => setAttendCourse(null)} wide>
-          <AttendancePanel course={attendCourse} data={state.cal.attendance[attendCourse.id]}
-            sessionDates={getCourseSessionDates(attendCourse)}
-            onUpdate={(patch) => updateAttendance(attendCourse.id, patch)} />
-        </Modal>
-      )}
+      {attendCourse && (() => {
+        const parentCourse = attendCourse.__parentCourseId
+          ? semesters.flatMap((s) => s.courses).find((c) => c.id === attendCourse.__parentCourseId)
+          : null;
+        const sessionDates = parentCourse ? getTutorialSessionDates(parentCourse) : getCourseSessionDates(attendCourse);
+        const cancelledDates = parentCourse ? (parentCourse.tutorial && parentCourse.tutorial.cancelled) || [] : null;
+        return (
+          <Modal title={attendCourse.name} onClose={() => setAttendCourse(null)} wide>
+            <AttendancePanel course={attendCourse} data={state.cal.attendance[attendCourse.id]}
+              sessionDates={sessionDates}
+              cancelledDates={cancelledDates}
+              onToggleCancel={parentCourse ? (dateKey) => toggleTutorialCancelled(parentCourse.id, dateKey) : null}
+              onUpdate={(patch) => updateAttendance(attendCourse.id, patch)} />
+          </Modal>
+        );
+      })()}
     </div>
   );
 }
@@ -1519,6 +1693,15 @@ function CalendarPage({ state, setState, today, imgSaving, imgSaved, imgProgress
 function CourseForm({ course, creditTypes, onSave }) {
   const [f, setF] = useState(course || { id: uid(), name: "", professor: "", code: "", room: "", credits: "", day: 1, start: "09:00", end: "10:00", color: "#a97c7c", creditType: "" });
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const hasTutorial = !!f.tutorial;
+  function toggleTutorial(on) {
+    if (on) {
+      setF({ ...f, tutorial: { day: f.day, start: f.end, end: minutesToTime(timeToMinutes(f.end) + 60), color: f.color, cancelled: [] } });
+    } else {
+      setF({ ...f, tutorial: null });
+    }
+  }
+  const setTutorial = (k) => (e) => setF({ ...f, tutorial: { ...f.tutorial, [k]: e.target.value } });
   return (
     <div className="form-col">
       <Field label="課程名稱"><input value={f.name} onChange={set("name")} /></Field>
@@ -1544,6 +1727,28 @@ function CourseForm({ course, creditTypes, onSave }) {
         <Field label="結束時間"><input type="time" value={f.end} onChange={set("end")} /></Field>
       </div>
       <Field label="圖塊顏色"><input type="color" value={f.color} onChange={set("color")} /></Field>
+
+      <div className="settings-row">
+        <span className="settings-icon"><Clock size={16} /></span>
+        <span>加開固定輔導課</span>
+        <Toggle checked={hasTutorial} onChange={toggleTutorial} />
+      </div>
+      {hasTutorial && (
+        <div className="form-col" style={{ paddingLeft: 12, borderLeft: "2px solid var(--pink-border)" }}>
+          <div className="bg-adjust-hint">輔導課會固定在每週這個時段顯示在行事曆上，設定完後也可以在輔導課的出席紀錄裡，單獨取消其中某一週。</div>
+          <Field label="星期">
+            <select value={f.tutorial.day} onChange={(e) => setTutorial("day")({ target: { value: Number(e.target.value) } })}>
+              {WEEKDAY_FULL.map((w, i) => <option key={i} value={i + 1}>{w}</option>)}
+            </select>
+          </Field>
+          <div className="two-col">
+            <Field label="開始時間"><input type="time" value={f.tutorial.start} onChange={setTutorial("start")} /></Field>
+            <Field label="結束時間"><input type="time" value={f.tutorial.end} onChange={setTutorial("end")} /></Field>
+          </div>
+          <Field label="輔導課顏色"><input type="color" value={f.tutorial.color} onChange={setTutorial("color")} /></Field>
+        </div>
+      )}
+
       <button className="btn-solid" onClick={() => onSave(f)}>儲存課程</button>
     </div>
   );
@@ -2077,7 +2282,10 @@ function EventForm({ event, defaultDate, onSave, onDelete }) {
 }
 
 function AssignmentForm({ item, courseOptions, onSave, onDelete }) {
-  const [f, setF] = useState(item || { id: uid(), name: "", course: "", dueDate: toKey(new Date()), dueTime: "23:59", note: "", fileLink: "" });
+  const [f, setF] = useState(item || {
+    id: uid(), name: "", course: "", dueDate: "", dueTime: "", note: "", fileLink: "",
+    addToCalendar: false, calDate: toKey(new Date()), calStart: "09:00", calEnd: "10:00", color: "#7d97ab",
+  });
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   // if the saved course isn't in the current course list (e.g. it was renamed/removed since), keep
   // showing it as an option so the select doesn't silently blank out an existing selection
@@ -2093,10 +2301,28 @@ function AssignmentForm({ item, courseOptions, onSave, onDelete }) {
       </Field>
       <div className="two-col">
         <Field label="截止日期"><input type="date" value={f.dueDate} onChange={set("dueDate")} /></Field>
-        <Field label="截止時間"><input type="time" value={f.dueTime} onChange={set("dueTime")} /></Field>
+        <Field label="截止時間（選填）">
+          <OptionalTimeField value={f.dueTime} onChange={(v) => setF({ ...f, dueTime: v })} />
+        </Field>
       </div>
       <Field label="備註"><input value={f.note} onChange={set("note")} /></Field>
       <Field label="檔案連結"><input type="url" value={f.fileLink} onChange={set("fileLink")} placeholder="https://..." /></Field>
+      <div className="settings-row">
+        <span className="settings-icon"><CalendarDays size={16} /></span>
+        <span>加入行事曆</span>
+        <Toggle checked={!!f.addToCalendar} onChange={(v) => setF({ ...f, addToCalendar: v })} />
+      </div>
+      {f.addToCalendar && (
+        <div className="form-col" style={{ paddingLeft: 12, borderLeft: "2px solid var(--pink-border)" }}>
+          <div className="bg-adjust-hint">這裡的時間是行事曆上顯示的時段，跟上面的截止日期/時間是分開的，可以自由填寫，例如打算什麼時候動手寫這份作業。</div>
+          <Field label="日期"><input type="date" value={f.calDate} onChange={set("calDate")} /></Field>
+          <div className="two-col">
+            <Field label="開始時間"><input type="time" value={f.calStart} onChange={set("calStart")} /></Field>
+            <Field label="結束時間"><input type="time" value={f.calEnd} onChange={set("calEnd")} /></Field>
+          </div>
+          <Field label="圖塊顏色"><input type="color" value={f.color} onChange={set("color")} /></Field>
+        </div>
+      )}
       <div className="two-col">
         <button className="btn-solid" onClick={() => onSave(f)}>儲存</button>
         {onDelete && <button className="btn-outline" onClick={onDelete}>刪除</button>}
@@ -2106,7 +2332,7 @@ function AssignmentForm({ item, courseOptions, onSave, onDelete }) {
 }
 
 function ExamForm({ item, courseOptions, onSave, onDelete }) {
-  const [f, setF] = useState(item || { id: uid(), name: "", course: "", date: toKey(new Date()), time: "09:00", note: "" });
+  const [f, setF] = useState(item || { id: uid(), name: "", course: "", date: "", start: "", end: "", note: "", addToCalendar: false, color: "#c9896a" });
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const options = f.course && !courseOptions.includes(f.course) ? [f.course, ...courseOptions] : courseOptions;
   return (
@@ -2118,11 +2344,24 @@ function ExamForm({ item, courseOptions, onSave, onDelete }) {
           {options.map((n) => <option key={n} value={n}>{n}</option>)}
         </select>
       </Field>
+      <Field label="日期"><input type="date" value={f.date} onChange={set("date")} /></Field>
       <div className="two-col">
-        <Field label="日期"><input type="date" value={f.date} onChange={set("date")} /></Field>
-        <Field label="時間"><input type="time" value={f.time} onChange={set("time")} /></Field>
+        <Field label="開始時間（選填）">
+          <OptionalTimeField value={f.start} onChange={(v) => setF({ ...f, start: v })} />
+        </Field>
+        <Field label="結束時間（選填）">
+          <OptionalTimeField value={f.end} onChange={(v) => setF({ ...f, end: v })} />
+        </Field>
       </div>
       <Field label="備註"><input value={f.note} onChange={set("note")} /></Field>
+      <div className="settings-row">
+        <span className="settings-icon"><CalendarDays size={16} /></span>
+        <span>加入行事曆</span>
+        <Toggle checked={!!f.addToCalendar} onChange={(v) => setF({ ...f, addToCalendar: v })} />
+      </div>
+      {f.addToCalendar && (
+        <Field label="圖塊顏色"><input type="color" value={f.color} onChange={set("color")} /></Field>
+      )}
       <div className="two-col">
         <button className="btn-solid" onClick={() => onSave(f)}>儲存</button>
         {onDelete && <button className="btn-outline" onClick={onDelete}>刪除</button>}
@@ -2131,7 +2370,87 @@ function ExamForm({ item, courseOptions, onSave, onDelete }) {
   );
 }
 
-function AttendancePanel({ course, data, sessionDates, onUpdate }) {
+function TodoForm({ item, onSave, onDelete }) {
+  const [f, setF] = useState(item || {
+    id: uid(), title: "", subitems: [], note: "", done: false,
+    dueDate: "", dueTime: "",
+    scheduled: false, date: toKey(new Date()), start: "09:00", end: "10:00", color: "#7d97ab",
+  });
+  const [newSub, setNewSub] = useState("");
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+
+  function addSubitem() {
+    if (!newSub.trim()) return;
+    setF({ ...f, subitems: [...(f.subitems || []), { id: uid(), text: newSub.trim(), done: false }] });
+    setNewSub("");
+  }
+  function toggleSubitem(id) {
+    setF({ ...f, subitems: f.subitems.map((si) => si.id === id ? { ...si, done: !si.done } : si) });
+  }
+  function removeSubitem(id) {
+    setF({ ...f, subitems: f.subitems.filter((si) => si.id !== id) });
+  }
+  function toggleScheduled(on) {
+    setF({ ...f, scheduled: on });
+  }
+
+  return (
+    <div className="form-col">
+      <Field label="事項名稱"><input value={f.title} onChange={set("title")} /></Field>
+
+      <Field label="細項">
+        <div className="form-col" style={{ gap: 6 }}>
+          {(f.subitems || []).map((si) => (
+            <div className="two-col" key={si.id} style={{ gridTemplateColumns: "auto 1fr auto", alignItems: "center" }}>
+              <input type="checkbox" checked={!!si.done} onChange={() => toggleSubitem(si.id)} />
+              <span style={{ textDecoration: si.done ? "line-through" : "none", opacity: si.done ? 0.6 : 1 }}>{si.text}</span>
+              <button className="icon-btn" onClick={() => removeSubitem(si.id)}><X size={14} /></button>
+            </div>
+          ))}
+          <div className="inline-add">
+            <input placeholder="輸入細項後按新增" value={newSub} onChange={(e) => setNewSub(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addSubitem()} />
+            <button className="btn-outline" onClick={addSubitem}><Plus size={14} /></button>
+          </div>
+        </div>
+      </Field>
+
+      <Field label="備註"><input value={f.note} onChange={set("note")} /></Field>
+
+      <div className="two-col">
+        <Field label="截止日期（選填）"><input type="date" value={f.dueDate} onChange={set("dueDate")} /></Field>
+        <Field label="截止時間（選填）">
+          <OptionalTimeField value={f.dueTime} onChange={(v) => setF({ ...f, dueTime: v })} />
+        </Field>
+      </div>
+      {f.dueDate && (
+        <button className="btn-outline" onClick={() => setF({ ...f, dueDate: "", dueTime: "" })}>清除截止日期</button>
+      )}
+
+      <div className="settings-row">
+        <span className="settings-icon"><CalendarDays size={16} /></span>
+        <span>安排進行事曆</span>
+        <Toggle checked={f.scheduled} onChange={toggleScheduled} />
+      </div>
+      {f.scheduled && (
+        <div className="form-col" style={{ paddingLeft: 12, borderLeft: "2px solid var(--pink-border)" }}>
+          <Field label="日期"><input type="date" value={f.date} onChange={set("date")} /></Field>
+          <div className="two-col">
+            <Field label="開始時間"><input type="time" value={f.start} onChange={set("start")} /></Field>
+            <Field label="結束時間"><input type="time" value={f.end} onChange={set("end")} /></Field>
+          </div>
+          <Field label="圖塊顏色"><input type="color" value={f.color} onChange={set("color")} /></Field>
+        </div>
+      )}
+
+      <div className="two-col">
+        <button className="btn-solid" onClick={() => onSave(f)}>儲存</button>
+        {onDelete && <button className="btn-outline" onClick={onDelete}>刪除</button>}
+      </div>
+    </div>
+  );
+}
+
+function AttendancePanel({ course, data, sessionDates, cancelledDates, onToggleCancel, onUpdate }) {
   const d = data || { records: {}, notes: [] };
   const records = d.records || {};
   const notes = d.notes || [];
@@ -2140,7 +2459,10 @@ function AttendancePanel({ course, data, sessionDates, onUpdate }) {
   const STATUS = [["present", "出席"], ["late", "遲到"], ["absent", "曠課"], ["leave", "請假"], ["cancelled", "停課"]];
 
   const counts = { present: 0, late: 0, absent: 0, leave: 0 };
-  Object.values(records).forEach((st) => { if (counts[st] !== undefined) counts[st]++; });
+  Object.entries(records).forEach(([dateKey, st]) => {
+    if (cancelledDates && cancelledDates.includes(dateKey)) return; // a cancelled week never counts toward attendance
+    if (counts[st] !== undefined) counts[st]++;
+  });
 
   function setStatus(dateKey, status) {
     const next = { ...records };
@@ -2189,17 +2511,27 @@ function AttendancePanel({ course, data, sessionDates, onUpdate }) {
             {sessionDates.map((sd, i) => {
               const key = toKey(sd);
               const status = records[key];
+              const isCancelled = cancelledDates && cancelledDates.includes(key);
               return (
-                <div className="session-row" key={key}>
+                <div className={"session-row" + (isCancelled ? " session-row-cancelled" : "")} key={key}>
                   <div className="session-date-row">
                     <span className="session-date">{sd.getMonth() + 1}月{sd.getDate()}日（{WEEKDAY_CN[course.day - 1]}）</span>
                     <span className="session-week">第 {i + 1} 週</span>
+                    {onToggleCancel && (
+                      <button className={"session-cancel-btn" + (isCancelled ? " on" : "")} onClick={() => onToggleCancel(key)}>
+                        {isCancelled ? "已取消，點擊恢復" : "取消本週"}
+                      </button>
+                    )}
                   </div>
-                  <div className="session-buttons">
-                    {STATUS.map(([k, label]) => (
-                      <button key={k} className={"session-btn" + (status === k ? " on" : "")} onClick={() => setStatus(key, k)}>{label}</button>
-                    ))}
-                  </div>
+                  {isCancelled ? (
+                    <div className="session-cancelled-hint">本週輔導課已取消</div>
+                  ) : (
+                    <div className="session-buttons">
+                      {STATUS.map(([k, label]) => (
+                        <button key={k} className={"session-btn" + (status === k ? " on" : "")} onClick={() => setStatus(key, k)}>{label}</button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -2504,7 +2836,7 @@ function SettingsPage({ state, setState, today }) {
           </div>
           <div className="settings-row">
             <span className="settings-icon">✉️</span>
-            <span>通知</span>
+            <span>通知（首頁截止日提醒橫幅）</span>
             <Toggle checked={p.notifications} onChange={(v) => set({ notifications: v })} />
           </div>
           <div className="settings-row clickable" onClick={() => setModal("fontFamily")}>
@@ -2591,7 +2923,7 @@ export default function App() {
     const id = setInterval(() => setNow(new Date()), 5 * 60 * 1000);
     return () => clearInterval(id);
   }, [state.profile.notifications]);
-  const reminders = state.profile.notifications ? getUpcomingDeadlines(state.assignments, state.exams, now) : [];
+  const reminders = state.profile.notifications ? getUpcomingDeadlines(state.assignments, state.exams, state.todos, now) : [];
 
   if (!loaded) return <div className="app-loading">載入中...</div>;
 
@@ -2892,6 +3224,10 @@ input[type=color] { padding: 3px; height: 38px; }
 .session-buttons { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; }
 .session-btn { font-size: 10.5px; padding: 7px 2px; border-radius: 8px; border: 1px solid var(--pink-border); background: var(--card); color: var(--text); font-weight: 700; cursor: pointer; }
 .session-btn.on { background: var(--accent); color: white; border-color: var(--accent); }
+.session-cancel-btn { font-size: 10px; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--pink-border); background: var(--card); color: var(--text); cursor: pointer; white-space: nowrap; }
+.session-cancel-btn.on { background: #b95c5c; color: white; border-color: #b95c5c; }
+.session-row-cancelled { opacity: 0.7; }
+.session-cancelled-hint { font-size: 11.5px; color: var(--text); opacity: 0.7; text-align: center; padding: 4px 0; }
 .note-row { background: var(--white); border-radius: 8px; padding: 8px 10px; font-size: 12px; display: flex; gap: 8px; }
 .note-date { color: var(--accent); font-weight: 700; flex-shrink: 0; }
 .period-cal { background: var(--card); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); border: 1px solid var(--pink-border); border-radius: 16px; padding: 14px; }
