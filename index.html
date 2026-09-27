@@ -21,7 +21,6 @@
 <style>
   html, body { margin: 0; padding: 0; background: #F7F4EF; }
   #root { min-height: 100vh; }
-  /* simple loading placeholder shown before React mounts */
   #boot-loading {
     position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC", "Microsoft JhengHei", sans-serif;
@@ -29,8 +28,6 @@
   }
 </style>
 
-<!-- Resolve bare-specifier imports ("react", "lucide-react", ...) inside app.jsx to CDN ESM builds.
-     No bundler/build step needed - the browser's native ES module loader reads this directly. -->
 <script type="importmap">
 {
   "imports": {
@@ -46,13 +43,10 @@
 <body>
 <div id="root"><div id="boot-loading">載入中…</div></div>
 
-<!-- Babel standalone transpiles app.jsx's JSX syntax in the browser, then runs the result as a
-     real ES module (data-type="module") so the import statements above resolve via the import map. -->
 <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
 <script type="text/babel" data-type="module" data-presets="react" src="./app.jsx"></script>
 
 <script>
-  // basic offline support / installability boost - optional, fails silently if unsupported
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => {
       navigator.serviceWorker.register("./sw.js").catch(() => {});

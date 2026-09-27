@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  PieChart, Pie, Cell, Legend
+  PieChart, Pie, Cell, Legend, BarChart, Bar, ReferenceLine
 } from "recharts";
 
 /* ============================== local storage (IndexedDB) ============================== */
@@ -1082,6 +1082,28 @@ function FinancePage({ state, setState, today }) {
     return Object.entries(map).map(([name, value]) => ({ name, value }));
   }, [md.entries]);
 
+  // weekly spending chart (Sun-Sat), navigable independently of the month being viewed above
+  const [weekStart, setWeekStart] = useState(() => {
+    const d = new Date(today);
+    d.setDate(d.getDate() - d.getDay());
+    d.setHours(0, 0, 0, 0);
+    return d;
+  });
+  const allEntries = useMemo(() => Object.values(state.finance.months).flatMap((m) => m.entries || []), [state.finance.months]);
+  const weeklyData = useMemo(() => {
+    const labels = ["日", "一", "二", "三", "四", "五", "六"];
+    return labels.map((label, i) => {
+      const d = addDays(weekStart, i);
+      const dateKey = toKey(d);
+      const total = allEntries.filter((e) => e.date === dateKey).reduce((s, e) => s + Number(e.amount || 0), 0);
+      return { day: label, dateKey, 支出: total };
+    });
+  }, [weekStart, allEntries]);
+  const weeklyTotal = weeklyData.reduce((s, d) => s + d.支出, 0);
+  const weeklyAvg = weeklyTotal / 7;
+  const weekEnd = addDays(weekStart, 6);
+  const weekRangeLabel = `${weekStart.getMonth() + 1}/${weekStart.getDate()} – ${weekEnd.getMonth() + 1}/${weekEnd.getDate()}`;
+
   return (
     <div className="page">
       <TopHeader
@@ -1107,6 +1129,7 @@ function FinancePage({ state, setState, today }) {
               <button className="btn-outline" onClick={() => setModal("budget")}>預算</button>
               <button className="btn-outline" onClick={() => setModal("category")}>分類</button>
               <button className="btn-outline" onClick={() => setModal("chart")}>圖表</button>
+              <button className="btn-outline" onClick={() => { setEditEntry(null); setModal("entry"); }}><Plus size={16} /> 新增</button>
             </div>
           </div>
         </PinkPanel>
@@ -1131,7 +1154,6 @@ function FinancePage({ state, setState, today }) {
             ))}
           </div>
         </div>
-        <button className="fab" onClick={() => { setEditEntry(null); setModal("entry"); }}><Plus size={26} /></button>
       </div>
 
       {modal === "holding" && (
@@ -1170,6 +1192,28 @@ function FinancePage({ state, setState, today }) {
                 </div>
               </div>
             ) : <div className="empty-hint">尚未設定本月預算</div>}
+          </div>
+          <div className="chart-block">
+            <div className="chart-title-row">
+              <div className="chart-title">每週消費紀錄</div>
+              <span className="week-switch">
+                <span>{weekRangeLabel}</span>
+                <button className="icon-btn" onClick={() => setWeekStart(addDays(weekStart, -7))}><ChevronLeft size={16} /></button>
+                <button className="icon-btn" onClick={() => setWeekStart(addDays(weekStart, 7))}><ChevronRight size={16} /></button>
+              </span>
+            </div>
+            <div className="week-avg-label">本週平均：{fmtMoney(Math.round(weeklyAvg))}</div>
+            <ResponsiveContainer width="100%" height={200}>
+              <BarChart data={weeklyData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#d8cdc0" vertical={false} />
+                <XAxis dataKey="day" tick={{ fontSize: 12 }} stroke="#6b5648" />
+                <YAxis tick={{ fontSize: 12 }} stroke="#6b5648" />
+                <Tooltip formatter={(v) => fmtMoney(v)} />
+                <ReferenceLine y={weeklyAvg} stroke="#8a9a6f" strokeDasharray="4 4" />
+                <Bar dataKey="支出" fill="#a97c7c" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+            <div className="budget-usage-text">本週總計 {fmtMoney(weeklyTotal)}</div>
           </div>
           <div className="chart-block">
             <div className="chart-title">近一年消費支出</div>
@@ -2675,49 +2719,61 @@ function BgPositionAdjuster({ image, position, scale, aspect, imgSaving, imgSave
 
 function PeriodPage({ state, setState, today }) {
   const [viewDate, setViewDate] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
-  const [pendingStart, setPendingStart] = useState(null);
-  const [confirmAction, setConfirmAction] = useState(null); // {type: 'start'|'end'|'delete', dateKey, range}
+  const [confirmAction, setConfirmAction] = useState(null); // {type, dateKey, range}
   const ranges = state.period.ranges;
+  const todayKey = toKey(today);
+  // an "open" range (end === null) is a period that's been started but not yet closed - it's saved
+  // the instant the start day is picked, and its red marking tracks the real calendar date: today
+  // it shows up to today, tomorrow it'll show up to tomorrow too, and so on, until an end day is
+  // actually chosen (at which point it becomes a normal closed range and stops growing).
+  const openRange = ranges.find((r) => r.end === null);
 
-  function isInRange(dateKey) {
-    return ranges.some((r) => r.start <= dateKey && dateKey <= r.end);
+  function isMarked(dateKey) {
+    return ranges.some((r) => r.end === null ? (r.start <= dateKey && dateKey <= todayKey) : (r.start <= dateKey && dateKey <= r.end));
   }
-  function rangeOwning(dateKey) {
-    return ranges.find((r) => r.start <= dateKey && dateKey <= r.end);
+  function closedRangeOwning(dateKey) {
+    return ranges.find((r) => r.end !== null && r.start <= dateKey && dateKey <= r.end);
   }
   function fmtShort(dateKey) { return dateKey.slice(5).replace("-", "/"); }
 
   function handleClickDay(dateKey) {
-    const owning = rangeOwning(dateKey);
+    if (openRange) {
+      // while a period is open, any day clicked ends it there - swapping handles the rare case
+      // of clicking a day before the start
+      setConfirmAction({ type: "end", dateKey, range: openRange });
+      return;
+    }
+    const owning = closedRangeOwning(dateKey);
     if (owning) {
       setConfirmAction({ type: "delete", dateKey, range: owning });
       return;
     }
-    if (pendingStart === null) {
-      setConfirmAction({ type: "start", dateKey });
-    } else {
-      setConfirmAction({ type: "end", dateKey });
-    }
+    setConfirmAction({ type: "start", dateKey });
   }
 
   function confirmYes() {
     if (!confirmAction) return;
     if (confirmAction.type === "delete") {
       setState((s) => ({ ...s, period: { ...s.period, ranges: s.period.ranges.filter((r) => r !== confirmAction.range) } }));
-      setPendingStart(null);
     } else if (confirmAction.type === "start") {
-      setPendingStart(confirmAction.dateKey);
+      // saved immediately as an open range - marking grows with the real date from here on
+      setState((s) => ({ ...s, period: { ...s.period, ranges: [...s.period.ranges, { start: confirmAction.dateKey, end: null }] } }));
     } else if (confirmAction.type === "end") {
-      let start = pendingStart, end = confirmAction.dateKey;
+      let start = confirmAction.range.start, end = confirmAction.dateKey;
       if (end < start) { [start, end] = [end, start]; }
-      setState((s) => ({ ...s, period: { ...s.period, ranges: [...s.period.ranges, { start, end }] } }));
-      setPendingStart(null);
+      setState((s) => ({
+        ...s, period: { ...s.period, ranges: s.period.ranges.map((r) => r === confirmAction.range ? { start, end } : r) },
+      }));
     }
     setConfirmAction(null);
   }
   function confirmNo() { setConfirmAction(null); }
+  function cancelOpenRange() {
+    setState((s) => ({ ...s, period: { ...s.period, ranges: s.period.ranges.filter((r) => r !== openRange) } }));
+  }
 
-  const sortedRanges = [...ranges].sort((a, b) => a.start < b.start ? -1 : 1);
+  const closedRanges = ranges.filter((r) => r.end !== null);
+  const sortedRanges = [...closedRanges].sort((a, b) => a.start < b.start ? -1 : 1);
   let avgCycle = 0, avgLength = 0, nextStart = "";
   if (sortedRanges.length > 0) {
     const lengths = sortedRanges.map((r) => (new Date(r.end) - new Date(r.start)) / 86400000 + 1);
@@ -2764,10 +2820,10 @@ function PeriodPage({ state, setState, today }) {
             {cells.map((day, i) => {
               if (day === null) return <div key={i} className="period-day empty" />;
               const dateKey = `${y}-${pad2(m + 1)}-${pad2(day)}`;
-              const marked = isInRange(dateKey);
-              const isPending = pendingStart === dateKey;
+              const marked = isMarked(dateKey);
+              const isOngoing = openRange && dateKey >= openRange.start && dateKey <= todayKey;
               return (
-                <button key={i} className={"period-day" + (marked ? " marked" : "") + (isPending ? " pending" : "")}
+                <button key={i} className={"period-day" + (marked ? " marked" : "") + (isOngoing ? " pending" : "")}
                   onClick={() => handleClickDay(dateKey)}>
                   {day}
                   {marked && <span className="period-underline" />}
@@ -2775,10 +2831,10 @@ function PeriodPage({ state, setState, today }) {
               );
             })}
           </div>
-          {pendingStart && (
+          {openRange && (
             <div className="empty-hint">
-              已選擇開始日 {fmtShort(pendingStart)}，請點選結束日
-              <button className="icon-btn" style={{ marginLeft: 6 }} onClick={() => setPendingStart(null)}>取消</button>
+              生理期進行中，開始於 {fmtShort(openRange.start)}，點選任一天即可設為結束日
+              <button className="icon-btn" style={{ marginLeft: 6 }} onClick={cancelOpenRange}>取消這次記錄</button>
             </div>
           )}
         </div>
@@ -2790,8 +2846,8 @@ function PeriodPage({ state, setState, today }) {
               {confirmAction.type === "delete"
                 ? `要移除 ${fmtShort(confirmAction.range.start)} ～ ${fmtShort(confirmAction.range.end)} 這筆生理期記錄嗎？`
                 : confirmAction.type === "start"
-                ? `將 ${fmtShort(confirmAction.dateKey)} 設為生理期開始日？`
-                : `將 ${fmtShort(confirmAction.dateKey)} 設為結束日？（開始日：${fmtShort(pendingStart)}）`}
+                ? `將 ${fmtShort(confirmAction.dateKey)} 設為生理期開始日？（設定後會立即開始記錄，紅色標示會隨著日期一天一天延續，直到你選擇結束日）`
+                : `將 ${fmtShort(confirmAction.dateKey)} 設為結束日？（開始日：${fmtShort(confirmAction.range.start)}）`}
             </div>
             <div className="two-col">
               <button className="btn-outline" onClick={confirmNo}>取消</button>
@@ -3105,6 +3161,10 @@ input[type=color] { padding: 3px; height: 38px; }
 .table-row { border-bottom: 1px solid var(--pink-border); }
 .chart-block { margin-bottom: 20px; }
 .chart-title { font-weight: 700; color: var(--text-strong); margin-bottom: 8px; font-size: 14px; }
+.chart-title-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.chart-title-row .chart-title { margin-bottom: 0; }
+.week-avg-label { font-size: 12px; color: var(--text); opacity: 0.75; margin-bottom: 4px; }
+.week-switch { display: flex; align-items: center; gap: 2px; font-size: 12px; font-weight: 700; color: var(--text-strong); white-space: nowrap; }
 .budget-usage { display: flex; flex-direction: column; gap: 8px; }
 .budget-bar-track { width: 100%; height: 14px; background: var(--white); border-radius: 8px; overflow: hidden; border: 1px solid var(--pink-border); }
 .budget-bar-fill { height: 100%; background: var(--accent); border-radius: 8px; transition: width 0.3s; }
