@@ -120,6 +120,7 @@ function startOfWeekMonday(d) {
 }
 function addDays(d, n) { const nd = new Date(d); nd.setDate(nd.getDate() + n); return nd; }
 function fmtMoney(n) { return "$" + Number(n || 0).toLocaleString(); }
+function fmtDateTime(d) { return `${d.getMonth() + 1}/${d.getDate()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`; }
 function timeToMinutes(t) { if (!t) return 0; const [h, m] = t.split(":").map(Number); return h * 60 + m; }
 function minutesToTime(m) { m = Math.max(0, Math.min(23 * 60 + 59, m)); const h = Math.floor(m / 60); const mm = m % 60; return `${pad2(h)}:${pad2(mm)}`; }
 function dateOnlyLess(a, b) { return a < b; }
@@ -129,13 +130,19 @@ function buildTodayTimeline(cal, dateObj) {
   const todayKey = toKey(dateObj);
   const todayWeekday = (dateObj.getDay() + 6) % 7; // 0=Mon
   const todaysSemester = findSemesterForDate(cal.semesters, dateObj);
-  const todaysCourses = (todaysSemester && todaysSemester.courses ? todaysSemester.courses : [])
-    .filter((c) => c.day === todayWeekday + 1)
+  const semesterCourses = todaysSemester && todaysSemester.courses ? todaysSemester.courses : [];
+  const todaysCourses = semesterCourses
+    .filter((c) => c.day === todayWeekday + 1 && cal.attendance?.[c.id]?.records?.[todayKey] !== "cancelled")
     .map((c) => ({ kind: "course", time: c.start, endTime: c.end, title: c.name, sub: `${c.room || ""} ${c.professor || ""}`.trim(), color: c.color }));
+  const todaysTutorials = semesterCourses
+    .filter((c) => c.tutorial && c.tutorial.day === todayWeekday + 1
+      && !(c.tutorial.cancelled || []).includes(todayKey)
+      && cal.attendance?.[c.id + "__tutorial"]?.records?.[todayKey] !== "cancelled")
+    .map((c) => ({ kind: "tutorial", time: c.tutorial.start, endTime: c.tutorial.end, title: `${c.name}（輔導）`, sub: `${c.tutorial.room || c.room || ""}`.trim(), color: c.tutorial.color || c.color }));
   const todaysEvents = (cal.events || [])
     .filter((e) => e.date === todayKey)
     .map((e) => ({ kind: "event", time: e.start || "00:00", endTime: e.end, title: e.title, sub: e.note, color: "#a68bbf" }));
-  return [...todaysCourses, ...todaysEvents].sort((a, b) => timeToMinutes(a.time) - timeToMinutes(b.time));
+  return [...todaysCourses, ...todaysTutorials, ...todaysEvents].sort((a, b) => timeToMinutes(a.time) - timeToMinutes(b.time));
 }
 // "站內提醒": 作業截止 / 考試日期落在未來 `days` 天內的項目 - this only ever runs while the app is
 // open (no background/push capability here), so it's re-evaluated on a timer against the current
@@ -567,14 +574,16 @@ function HomePage({ state, setState, today, reminders }) {
   const [editAssignment, setEditAssignment] = useState(null);
   const [editExam, setEditExam] = useState(null);
   const [editTodo, setEditTodo] = useState(null);
+  const [todoTab, setTodoTab] = useState("pending"); // "pending" | "done"
 
   const todos = state.todos || [];
-  const sortedTodos = todos.slice().sort((a, b) => {
-    if (!!a.done !== !!b.done) return a.done ? 1 : -1; // unfinished first
+  const pendingTodos = todos.filter((t) => !t.done).sort((a, b) => {
     const ak = a.dueDate ? `${a.dueDate}${a.dueTime || "23:59"}` : a.scheduled && a.date ? `${a.date}${a.start || ""}` : "9999";
     const bk = b.dueDate ? `${b.dueDate}${b.dueTime || "23:59"}` : b.scheduled && b.date ? `${b.date}${b.start || ""}` : "9999";
     return ak.localeCompare(bk);
   });
+  const doneTodos = todos.filter((t) => t.done).sort((a, b) => (b.completedAt || 0) - (a.completedAt || 0)); // most recently completed first
+  const sortedTodos = [...pendingTodos, ...doneTodos];
 
   function todoEventId(id) { return id + "__todo"; }
   function saveTodo(t) {
@@ -600,7 +609,9 @@ function HomePage({ state, setState, today, reminders }) {
     setModal("todos");
   }
   function toggleTodoDone(id) {
-    setState((s) => ({ ...s, todos: (s.todos || []).map((x) => x.id === id ? { ...x, done: !x.done } : x) }));
+    setState((s) => ({
+      ...s, todos: (s.todos || []).map((x) => x.id === id ? { ...x, done: !x.done, completedAt: !x.done ? Date.now() : null } : x),
+    }));
   }
 
   const timeline = buildTodayTimeline(state.cal, today);
@@ -867,18 +878,23 @@ function HomePage({ state, setState, today, reminders }) {
       {modal === "todos" && (
         <Modal title="待辦事項" onClose={() => setModal(null)} wide>
           <button className="btn-outline" onClick={() => { setEditTodo(null); setModal("todoForm"); }}><Plus size={16} /> 新增待辦事項</button>
+          <div className="two-col" style={{ margin: "10px 0" }}>
+            <button className={todoTab === "pending" ? "btn-solid" : "btn-outline"} onClick={() => setTodoTab("pending")}>待辦（{pendingTodos.length}）</button>
+            <button className={todoTab === "done" ? "btn-solid" : "btn-outline"} onClick={() => setTodoTab("done")}>已完成（{doneTodos.length}）</button>
+          </div>
           <div className="course-list">
-            {sortedTodos.map((t) => {
+            {(todoTab === "pending" ? pendingTodos : doneTodos).map((t) => {
               const doneCount = (t.subitems || []).filter((si) => si.done).length;
               return (
                 <div className="course-row" key={t.id}>
-                  <input type="checkbox" checked={!!t.done} onChange={() => toggleTodoDone(t.id)} />
+                  <input type="checkbox" checked={!!t.done} onChange={() => toggleTodoDone(t.id)} title={t.done ? "取消完成，回到待辦" : "標記完成"} />
                   <span className="ellipsis" style={{ textDecoration: t.done ? "line-through" : "none", opacity: t.done ? 0.6 : 1, cursor: "pointer" }}
                     onClick={() => { setEditTodo(t); setModal("todoForm"); }}>
                     <strong style={t.dueDate && !t.done && t.dueDate < todayKeyForDeadline ? { color: "#b95c5c" } : undefined}>{t.title}</strong>
                     {t.subitems && t.subitems.length > 0 ? ` · ${doneCount}/${t.subitems.length} 項細項` : ""}
-                    {t.dueDate ? ` · 截止 ${t.dueDate}${t.dueTime ? ` ${t.dueTime}` : ""}` : ""}
-                    {t.scheduled && t.date ? ` · 行事曆 ${t.date}${t.start ? ` ${t.start}` : ""}` : ""}
+                    {t.done && t.completedAt ? ` · 完成於 ${fmtDateTime(new Date(t.completedAt))}` : ""}
+                    {!t.done && t.dueDate ? ` · 截止 ${t.dueDate}${t.dueTime ? ` ${t.dueTime}` : ""}` : ""}
+                    {!t.done && t.scheduled && t.date ? ` · 行事曆 ${t.date}${t.start ? ` ${t.start}` : ""}` : ""}
                   </span>
                   <span className="row-actions">
                     <button className="icon-btn" onClick={() => { setEditTodo(t); setModal("todoForm"); }}><Pencil size={14} /></button>
@@ -887,7 +903,8 @@ function HomePage({ state, setState, today, reminders }) {
                 </div>
               );
             })}
-            {sortedTodos.length === 0 && <div className="empty-hint">還沒有新增任何待辦事項</div>}
+            {todoTab === "pending" && pendingTodos.length === 0 && <div className="empty-hint">目前沒有待辦事項</div>}
+            {todoTab === "done" && doneTodos.length === 0 && <div className="empty-hint">還沒有已完成的事項</div>}
           </div>
         </Modal>
       )}
@@ -1090,16 +1107,30 @@ function FinancePage({ state, setState, today }) {
     return d;
   });
   const allEntries = useMemo(() => Object.values(state.finance.months).flatMap((m) => m.entries || []), [state.finance.months]);
+  const weekEntries = useMemo(() => {
+    const startKey = toKey(weekStart), endKey = toKey(addDays(weekStart, 6));
+    return allEntries.filter((e) => e.date >= startKey && e.date <= endKey);
+  }, [allEntries, weekStart]);
+  const weekCategories = useMemo(() => {
+    const set = new Set();
+    weekEntries.forEach((e) => set.add(e.category || "未分類"));
+    return Array.from(set);
+  }, [weekEntries]);
   const weeklyData = useMemo(() => {
     const labels = ["日", "一", "二", "三", "四", "五", "六"];
     return labels.map((label, i) => {
       const d = addDays(weekStart, i);
       const dateKey = toKey(d);
-      const total = allEntries.filter((e) => e.date === dateKey).reduce((s, e) => s + Number(e.amount || 0), 0);
-      return { day: label, dateKey, 支出: total };
+      const row = { day: label, dateKey };
+      weekCategories.forEach((cat) => { row[cat] = 0; });
+      weekEntries.filter((e) => e.date === dateKey).forEach((e) => {
+        const cat = e.category || "未分類";
+        row[cat] = (row[cat] || 0) + Number(e.amount || 0);
+      });
+      return row;
     });
-  }, [weekStart, allEntries]);
-  const weeklyTotal = weeklyData.reduce((s, d) => s + d.支出, 0);
+  }, [weekStart, weekEntries, weekCategories]);
+  const weeklyTotal = weekEntries.reduce((s, e) => s + Number(e.amount || 0), 0);
   const weeklyAvg = weeklyTotal / 7;
   const weekEnd = addDays(weekStart, 6);
   const weekRangeLabel = `${weekStart.getMonth() + 1}/${weekStart.getDate()} – ${weekEnd.getMonth() + 1}/${weekEnd.getDate()}`;
@@ -1203,16 +1234,28 @@ function FinancePage({ state, setState, today }) {
               </span>
             </div>
             <div className="week-avg-label">本週平均：{fmtMoney(Math.round(weeklyAvg))}</div>
-            <ResponsiveContainer width="100%" height={200}>
+            <ResponsiveContainer width="100%" height={220}>
               <BarChart data={weeklyData}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#d8cdc0" vertical={false} />
                 <XAxis dataKey="day" tick={{ fontSize: 12 }} stroke="#6b5648" />
                 <YAxis tick={{ fontSize: 12 }} stroke="#6b5648" />
                 <Tooltip formatter={(v) => fmtMoney(v)} />
                 <ReferenceLine y={weeklyAvg} stroke="#8a9a6f" strokeDasharray="4 4" />
-                <Bar dataKey="支出" fill="#a97c7c" radius={[4, 4, 0, 0]} />
+                {weekCategories.map((cat, i) => (
+                  <Bar key={cat} dataKey={cat} stackId="week" fill={CHART_COLORS[i % CHART_COLORS.length]} radius={i === weekCategories.length - 1 ? [4, 4, 0, 0] : 0} />
+                ))}
               </BarChart>
             </ResponsiveContainer>
+            {weekCategories.length > 0 && (
+              <div className="week-legend">
+                {weekCategories.map((cat, i) => (
+                  <span key={cat} className="week-legend-item">
+                    <span className="week-legend-dot" style={{ background: CHART_COLORS[i % CHART_COLORS.length] }} />
+                    {cat}
+                  </span>
+                ))}
+              </div>
+            )}
             <div className="budget-usage-text">本週總計 {fmtMoney(weeklyTotal)}</div>
           </div>
           <div className="chart-block">
@@ -1570,9 +1613,13 @@ function CalendarPage({ state, setState, today, imgSaving, imgSaved, imgProgress
               const dayKey = toKey(d);
               // courses only render when this specific date falls within a semester's term range
               const daySemester = findSemesterForDate(semesters, d);
-              const courses = daySemester ? daySemester.courses.filter((c) => c.day === dayNum) : [];
+              const courses = daySemester
+                ? daySemester.courses.filter((c) => c.day === dayNum && state.cal.attendance?.[c.id]?.records?.[dayKey] !== "cancelled")
+                : [];
               const tutorials = daySemester
-                ? daySemester.courses.filter((c) => c.tutorial && c.tutorial.day === dayNum && !(c.tutorial.cancelled || []).includes(dayKey))
+                ? daySemester.courses.filter((c) => c.tutorial && c.tutorial.day === dayNum
+                    && !(c.tutorial.cancelled || []).includes(dayKey)
+                    && state.cal.attendance?.[c.id + "__tutorial"]?.records?.[dayKey] !== "cancelled")
                 : [];
               const events = state.cal.events.filter((e) => e.date === dayKey);
               return (
@@ -3069,8 +3116,8 @@ const CSS = `
   background: transparent; }
 .panel-tag-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .panel-title-inline { font-weight: 700; color: var(--text-strong); }
-.timeline { display: flex; flex-direction: column; gap: 14px; padding-left: 4px; border-left: 2px dashed var(--border); margin-left: 6px; }
-.timeline-row { display: flex; align-items: flex-start; gap: 10px; margin-left: -8px; }
+.timeline { display: flex; flex-direction: column; gap: 14px; padding-left: 10px; border-left: 2px dashed var(--border); margin-left: 6px; }
+.timeline-row { display: flex; align-items: flex-start; gap: 10px; }
 .timeline-time { font-size: 11px; color: var(--text); width: 78px; flex-shrink: 0; padding-top: 2px; }
 .timeline-dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 3px; flex-shrink: 0; }
 .timeline-content { flex: 1; }
@@ -3165,6 +3212,9 @@ input[type=color] { padding: 3px; height: 38px; }
 .chart-title-row .chart-title { margin-bottom: 0; }
 .week-avg-label { font-size: 12px; color: var(--text); opacity: 0.75; margin-bottom: 4px; }
 .week-switch { display: flex; align-items: center; gap: 2px; font-size: 12px; font-weight: 700; color: var(--text-strong); white-space: nowrap; }
+.week-legend { display: flex; flex-wrap: wrap; gap: 10px; margin: 6px 0; }
+.week-legend-item { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-strong); }
+.week-legend-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: 0 0 auto; }
 .budget-usage { display: flex; flex-direction: column; gap: 8px; }
 .budget-bar-track { width: 100%; height: 14px; background: var(--white); border-radius: 8px; overflow: hidden; border: 1px solid var(--pink-border); }
 .budget-bar-fill { height: 100%; background: var(--accent); border-radius: 8px; transition: width 0.3s; }
