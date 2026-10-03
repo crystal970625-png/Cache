@@ -336,12 +336,17 @@ function useAppState() {
               finance: {
                 ...s.finance,
                 ...(parsed.finance || {}),
-                categories: (parsed.finance && Array.isArray(parsed.finance.categories) && parsed.finance.categories.length > 0)
-                  ? parsed.finance.categories
-                  : Array.from(new Set([
-                      ...(s.finance.categories || []),
-                      ...Object.values((parsed.finance && parsed.finance.months) || {}).flatMap((m) => m.categories || []),
-                    ])),
+                // always union in every category that's ever actually been used in any month's
+                // entries/category list, not just once - this way a stale/incomplete categories
+                // list from an earlier bug can never permanently hide a real historical category
+                categories: Array.from(new Set([
+                  ...(s.finance.categories || []),
+                  ...((parsed.finance && parsed.finance.categories) || []),
+                  ...Object.values((parsed.finance && parsed.finance.months) || {}).flatMap((m) => [
+                    ...(m.categories || []),
+                    ...((m.entries || []).map((e) => e.category).filter(Boolean)),
+                  ]),
+                ])),
               },
               cal: mergedCal,
               period: { ...s.period, ...(parsed.period || {}) },
