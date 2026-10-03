@@ -333,7 +333,16 @@ function useAppState() {
               ...parsed,
               profile: { ...s.profile, ...(parsed.profile || {}) },
               campusFiles: { ...s.campusFiles, ...(parsed.campusFiles || {}) },
-              finance: { ...s.finance, ...(parsed.finance || {}) },
+              finance: {
+                ...s.finance,
+                ...(parsed.finance || {}),
+                categories: (parsed.finance && Array.isArray(parsed.finance.categories) && parsed.finance.categories.length > 0)
+                  ? parsed.finance.categories
+                  : Array.from(new Set([
+                      ...(s.finance.categories || []),
+                      ...Object.values((parsed.finance && parsed.finance.months) || {}).flatMap((m) => m.categories || []),
+                    ])),
+              },
               cal: mergedCal,
               period: { ...s.period, ...(parsed.period || {}) },
             };
@@ -1042,13 +1051,9 @@ function FinancePage({ state, setState, today }) {
   const [monthDate, setMonthDate] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
   const monthKey = toMonthKey(monthDate);
   const md = state.finance.months[monthKey] || { income: 0, budget: 0, categories: ["餐飲", "交通", "娛樂", "其他"], entries: [] };
-  // categories are shared across every month now, not scoped per-month - fall back to merging
-  // whatever per-month categories already exist (older saved data) so nothing gets lost
-  const categories = useMemo(() => {
-    if (state.finance.categories && state.finance.categories.length > 0) return state.finance.categories;
-    const merged = Array.from(new Set(Object.values(state.finance.months || {}).flatMap((m) => m.categories || [])));
-    return merged.length > 0 ? merged : ["餐飲", "交通", "娛樂", "其他"];
-  }, [state.finance.categories, state.finance.months]);
+  // categories are shared across every month now (migrated once at load time from any
+  // pre-existing per-month categories, so nothing gets lost - see the load effect above)
+  const categories = state.finance.categories && state.finance.categories.length > 0 ? state.finance.categories : ["餐飲", "交通", "娛樂", "其他"];
   function updateCategories(cats) {
     setState((s) => ({ ...s, finance: { ...s.finance, categories: cats } }));
   }
