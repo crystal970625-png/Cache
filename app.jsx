@@ -136,7 +136,6 @@ function buildTodayTimeline(cal, dateObj) {
     .map((c) => ({ kind: "course", time: c.start, endTime: c.end, title: c.name, sub: `${c.room || ""} ${c.professor || ""}`.trim(), color: c.color }));
   const todaysTutorials = semesterCourses
     .filter((c) => c.tutorial && c.tutorial.day === todayWeekday + 1
-      && !(c.tutorial.cancelled || []).includes(todayKey)
       && cal.attendance?.[c.id + "__tutorial"]?.records?.[todayKey] !== "cancelled")
     .map((c) => ({ kind: "tutorial", time: c.tutorial.start, endTime: c.tutorial.end, title: `${c.name}（輔導）`, sub: `${c.tutorial.room || c.room || ""}`.trim(), color: c.tutorial.color || c.color }));
   const todaysEvents = (cal.events || [])
@@ -243,7 +242,7 @@ const DEFAULT_STATE = {
   assignments: [], // 作業: { id, name, course, dueDate, dueTime, note, fileLink }
   exams: [], // 考試: { id, name, course, date, start, end, note }
   todos: [], // 待辦事項: { id, title, subitems: [{id,text,done}], note, done, scheduled, date, start, end, color }
-  finance: { holdingAmount: 0, months: {} },
+  finance: { holdingAmount: 0, months: {}, categories: ["餐飲", "交通", "娛樂", "其他"] },
   cal: (() => {
     const ay0 = getAcademicYear(new Date());
     return {
@@ -1043,6 +1042,16 @@ function FinancePage({ state, setState, today }) {
   const [monthDate, setMonthDate] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
   const monthKey = toMonthKey(monthDate);
   const md = state.finance.months[monthKey] || { income: 0, budget: 0, categories: ["餐飲", "交通", "娛樂", "其他"], entries: [] };
+  // categories are shared across every month now, not scoped per-month - fall back to merging
+  // whatever per-month categories already exist (older saved data) so nothing gets lost
+  const categories = useMemo(() => {
+    if (state.finance.categories && state.finance.categories.length > 0) return state.finance.categories;
+    const merged = Array.from(new Set(Object.values(state.finance.months || {}).flatMap((m) => m.categories || [])));
+    return merged.length > 0 ? merged : ["餐飲", "交通", "娛樂", "其他"];
+  }, [state.finance.categories, state.finance.months]);
+  function updateCategories(cats) {
+    setState((s) => ({ ...s, finance: { ...s.finance, categories: cats } }));
+  }
 
   const [modal, setModal] = useState(null);
   const [editEntry, setEditEntry] = useState(null);
@@ -1205,7 +1214,7 @@ function FinancePage({ state, setState, today }) {
       )}
       {modal === "category" && (
         <Modal title="消費分類" onClose={() => setModal(null)}>
-          <CategoryEditor categories={md.categories} onChange={(cats) => updateMonth({ categories: cats })} />
+          <CategoryEditor categories={categories} onChange={updateCategories} />
         </Modal>
       )}
       {modal === "chart" && (
@@ -1288,7 +1297,7 @@ function FinancePage({ state, setState, today }) {
       )}
       {modal === "entry" && (
         <Modal title={editEntry ? "編輯消費紀錄" : "新增消費紀錄"} onClose={() => setModal(null)}>
-          <EntryForm entry={editEntry} categories={md.categories} monthKey={monthKey} today={today}
+          <EntryForm entry={editEntry} categories={categories} monthKey={monthKey} today={today}
             onSave={(e) => { saveEntry(e); setModal(null); }} />
         </Modal>
       )}
@@ -1408,20 +1417,6 @@ function CalendarPage({ state, setState, today, imgSaving, imgSaved, imgProgress
   }
   function deleteEvent(id) {
     setState((s) => ({ ...s, cal: { ...s.cal, events: s.cal.events.filter((x) => x.id !== id) } }));
-  }
-  function toggleTutorialCancelled(courseId, dateKey) {
-    setState((s) => ({
-      ...s, cal: {
-        ...s.cal, semesters: s.cal.semesters.map((sem) => ({
-          ...sem, courses: sem.courses.map((c) => {
-            if (c.id !== courseId || !c.tutorial) return c;
-            const cancelled = c.tutorial.cancelled || [];
-            const nextCancelled = cancelled.includes(dateKey) ? cancelled.filter((k) => k !== dateKey) : [...cancelled, dateKey];
-            return { ...c, tutorial: { ...c.tutorial, cancelled: nextCancelled } };
-          }),
-        })),
-      },
-    }));
   }
   function updateAttendance(courseId, patch) {
     setState((s) => ({
@@ -1618,7 +1613,6 @@ function CalendarPage({ state, setState, today, imgSaving, imgSaved, imgProgress
                 : [];
               const tutorials = daySemester
                 ? daySemester.courses.filter((c) => c.tutorial && c.tutorial.day === dayNum
-                    && !(c.tutorial.cancelled || []).includes(dayKey)
                     && state.cal.attendance?.[c.id + "__tutorial"]?.records?.[dayKey] !== "cancelled")
                 : [];
               const events = state.cal.events.filter((e) => e.date === dayKey);
@@ -1766,13 +1760,10 @@ function CalendarPage({ state, setState, today, imgSaving, imgSaved, imgProgress
           ? semesters.flatMap((s) => s.courses).find((c) => c.id === attendCourse.__parentCourseId)
           : null;
         const sessionDates = parentCourse ? getTutorialSessionDates(parentCourse) : getCourseSessionDates(attendCourse);
-        const cancelledDates = parentCourse ? (parentCourse.tutorial && parentCourse.tutorial.cancelled) || [] : null;
         return (
           <Modal title={attendCourse.name} onClose={() => setAttendCourse(null)} wide>
             <AttendancePanel course={attendCourse} data={state.cal.attendance[attendCourse.id]}
               sessionDates={sessionDates}
-              cancelledDates={cancelledDates}
-              onToggleCancel={parentCourse ? (dateKey) => toggleTutorialCancelled(parentCourse.id, dateKey) : null}
               onUpdate={(patch) => updateAttendance(attendCourse.id, patch)} />
           </Modal>
         );
@@ -1787,7 +1778,7 @@ function CourseForm({ course, creditTypes, onSave }) {
   const hasTutorial = !!f.tutorial;
   function toggleTutorial(on) {
     if (on) {
-      setF({ ...f, tutorial: { day: f.day, start: f.end, end: minutesToTime(timeToMinutes(f.end) + 60), color: f.color, cancelled: [] } });
+      setF({ ...f, tutorial: { day: f.day, start: f.end, end: minutesToTime(timeToMinutes(f.end) + 60), color: f.color } });
     } else {
       setF({ ...f, tutorial: null });
     }
@@ -2541,7 +2532,7 @@ function TodoForm({ item, onSave, onDelete }) {
   );
 }
 
-function AttendancePanel({ course, data, sessionDates, cancelledDates, onToggleCancel, onUpdate }) {
+function AttendancePanel({ course, data, sessionDates, onUpdate }) {
   const d = data || { records: {}, notes: [] };
   const records = d.records || {};
   const notes = d.notes || [];
@@ -2550,10 +2541,7 @@ function AttendancePanel({ course, data, sessionDates, cancelledDates, onToggleC
   const STATUS = [["present", "出席"], ["late", "遲到"], ["absent", "曠課"], ["leave", "請假"], ["cancelled", "停課"]];
 
   const counts = { present: 0, late: 0, absent: 0, leave: 0 };
-  Object.entries(records).forEach(([dateKey, st]) => {
-    if (cancelledDates && cancelledDates.includes(dateKey)) return; // a cancelled week never counts toward attendance
-    if (counts[st] !== undefined) counts[st]++;
-  });
+  Object.values(records).forEach((st) => { if (counts[st] !== undefined) counts[st]++; });
 
   function setStatus(dateKey, status) {
     const next = { ...records };
@@ -2602,20 +2590,18 @@ function AttendancePanel({ course, data, sessionDates, cancelledDates, onToggleC
             {sessionDates.map((sd, i) => {
               const key = toKey(sd);
               const status = records[key];
-              const isCancelled = cancelledDates && cancelledDates.includes(key);
+              const isCancelled = status === "cancelled";
               return (
                 <div className={"session-row" + (isCancelled ? " session-row-cancelled" : "")} key={key}>
                   <div className="session-date-row">
                     <span className="session-date">{sd.getMonth() + 1}月{sd.getDate()}日（{WEEKDAY_CN[course.day - 1]}）</span>
                     <span className="session-week">第 {i + 1} 週</span>
-                    {onToggleCancel && (
-                      <button className={"session-cancel-btn" + (isCancelled ? " on" : "")} onClick={() => onToggleCancel(key)}>
-                        {isCancelled ? "已取消，點擊恢復" : "取消本週"}
-                      </button>
+                    {isCancelled && (
+                      <button className="session-cancel-btn on" onClick={() => setStatus(key, "cancelled")}>已取消，點擊恢復</button>
                     )}
                   </div>
                   {isCancelled ? (
-                    <div className="session-cancelled-hint">本週輔導課已取消</div>
+                    <div className="session-cancelled-hint">{course.__parentCourseId ? "本週輔導課已取消" : "本週已停課"}</div>
                   ) : (
                     <div className="session-buttons">
                       {STATUS.map(([k, label]) => (
